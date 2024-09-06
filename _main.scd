@@ -2,9 +2,10 @@
 
 // 22 September responsive improvior. This will totally work.
 
-var detectingPitch = true, dEBUG=true, semaphore;
+var detectingPitch = true, dEBUG=true, semaphore, bufs;
 
 semaphore = Semaphore(1);
+bufs = [];
 
 
 s.options.memSize = s.options.memSize * 16;
@@ -14,14 +15,52 @@ s.waitForBoot({
 	// Let's have a delay line
 	SynthDef(\delay, { arg gate=1, in=0, delayTime=60, maxDelay=120, out=0, amp=1;
 
-		var input, delay, env;
+		var input, delay, env, buf;
+
+		buf = LocalBuf(SampleRate.ir * maxDelay);
 
 		input = SoundIn.ar(in, 1);
 		env = EnvGen.kr(Env.asr, gate, doneAction:2);
-		delay = DelayC.ar(input, maxDelay, delayTime, amp);
+		//delay = DelayC.ar(input, maxDelay, delayTime, amp);
+		delay = BufDelayN.ar(buf, input, delayTime, amp);
 
 		Out.ar(out, delay * env);
 	}).add;  // Maybe change this to use a buffer
+
+	bufs = bufs.add(Buffer.alloc(s, s.sampleRate * 60, 1));
+
+	SynthDef(\record, {arg gate=1, in=0, loop=1, bufnum=0, offset=0, loopPoint=1;
+
+		var input, recorder, env, min, max, index, frames;
+
+		frames = BufFrames.ir(bufnum);
+		max = loopPoint * frames;
+		min = offset * frames;
+
+		input = SoundIn.ar(in, 1);
+		env = EnvGen.kr(Env.asr, gate, doneAction:2);
+		//recorder = RecordBuf.ar(input * env, bufnum, loop:loop, doneAction:2);
+		index = Phasor.ar(0, 1,min, man, min)l
+		recorder = (input * env, bufnum, index, loop);
+	}). add;
+
+	SynthDef(\player, { arg gate=1, out=0, amp=1, bufnum=0, offset=0, loopPoint=0.25, rate=1, pan=0, loop=1;
+
+		var env, player, index, max, min, loopDur, frames;
+
+		frames = BufFrames.ir(bufnum);
+		max = loopPoint * frames;
+		min = offset * frames;
+		//loopDur =  rate;// rate * (loopPoint - offset);
+		index = Phasor.ar(0, BufRateScale.kr(bufnum) * rate, min, max, min);
+
+		player = BufRd.ar(1, bufnum, index, loop);
+		env = EnvGen.kr(Env.asr, gate, doneAction:2);
+
+		Out.ar(out, Pan2.ar(player, pan, env));
+	}).add;
+
+
 
 
 
@@ -154,7 +193,12 @@ s.waitForBoot({
 	s.sync;
 
 
-	Synth(\delay);
+	//Synth(\delay);
+
+	Synth(\record, [\bufnum, bufs[0].bufnum, \loop, 0]);
+	s.sync;
+	Synth(\player, [\bufnum, bufs[0].bufnum, \offset, 0.2, \loopPoint, 0.4, \rate, 1.1]);
+	Synth(\player, [\bufnum, bufs[0].bufnum, \offset, 0.39, \loopPoint, 0.8, \rate, 0.9]);
 
 
 })
