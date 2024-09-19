@@ -75,11 +75,12 @@ storeRiff = { arg collected, time;
 	});
 };
 
-sectionUpdater = {|current|
+sectionUpdater = {|current, adjustedTime|
 
 	var elapsedTime;
+	adjustedTime = adjustedTime ? startTime;
 
-	elapsedTime = (Date.getDate.rawSeconds - startTime).abs;
+	elapsedTime = (Date.getDate.rawSeconds - adjustedTime).abs;
 
 	// Section 0 must last for 2 minutes
 	((elapsedTime > 120) && current == 0) {
@@ -125,7 +126,9 @@ s.waitForBoot({
 
 	s.meter;
 
-	5.wait;
+	ClockFace().start;
+
+	//20.wait;
 
 
 	layoutBus = Bus.control(s);
@@ -432,7 +435,10 @@ s.waitForBoot({
 	clock.play;
 
 	routs = [
-		{
+		{|interactionStart=10|
+			var adjustedTime;
+			adjustedTime = ((interactionStart - startTime)/2) + startTime;
+			{
 			var playingRiff, next;
 			"section 0".postln;
 
@@ -446,15 +452,17 @@ s.waitForBoot({
 				//"note".postln;
 				playingRiff.next.yield;
 				(riffs.size > 0).if({
-					sectionUpdater(section);
+					sectionUpdater(section, adjustedTime);
 				});
 			});
 
 			//section = 1;
 			startSynth = [ \bajorSpa, \fm1].choose;
 			nil.yield;
+		}
 		},
 		{
+
 			var playingRiff, index, next, stretch;
 
 			"section 1".postln;
@@ -479,7 +487,7 @@ s.waitForBoot({
 				stretch = [2, 4, 8].wchoose([0.1, 0.45, 0.45]);
 
 				playingRiff = Pseq(playingRiff, 2).asStream;
-				next = playingRiff.next;
+				next = playingRiff.next.copy;
 
 				{next.notNil}.while({
 					next.postln;
@@ -491,7 +499,7 @@ s.waitForBoot({
 						});
 					});
 					next.yield;
-					next = playingRiff.next;
+					next = playingRiff.next.copy;
 				});
 				"loop".postln;
 			});
@@ -524,7 +532,7 @@ s.waitForBoot({
 				octave = [1, 2, 0.5].choose;
 
 				playingRiff = Pseq(playingRiff, 2).asStream;
-				next = playingRiff.next;
+				next = playingRiff.next.copy;
 
 				{next.notNil}.while({
 					next.postln;
@@ -539,7 +547,7 @@ s.waitForBoot({
 						});
 					});
 					next.yield;
-					next = playingRiff.next;
+					next = playingRiff.next.copy;
 				});
 				"loop".postln;
 			});
@@ -636,8 +644,80 @@ s.waitForBoot({
 		});
 	}).play;
 
-	startSynth = [ \bajorSpa, \fm1].choose;
 
+
+	// use a Pspawner
+
+	Pspawner({|ps|
+		var interctionStart, activeSynth;
+
+		ps.wait(30.rand);
+		interactionStart = Date.getDate.rawSeconds;
+
+		activeSynth =  [ \bajorSpa, \fm1].choose;
+
+
+		// section 0
+		ps.seq(
+			Ppar([
+				Pbind(
+					\instrument, activeSynth,
+					[\degree, \dur], Prout(routs[0].(interctionStart)),
+					\legato, 1.1,
+					\out, [0, compBus],
+					\group, sourceGroup
+				),
+				Pbind(
+					\instrument, activeSynth,
+					[\degree, \dur], Prout(routs[0].(interctionStart)),
+					\legato, 1.1,
+					\out, [0, compBus],
+					\group, sourceGroup,
+					\octave, 4
+				)
+			]);
+		);
+
+		//section 1
+		activeSynth =  [ \bajorSpa, \fm1].choose;
+
+		ps.seq(
+			Ptpar([
+				0, Pbind(
+					\instrument, activeSynth,
+					[\freq, \dur], Prout(routs[1]),
+					\legato, 1.1,
+					\out, [0, compBus],
+					\group, sourceGroup
+				),
+				0, Pbind(
+					\instrument, activeSynth,
+					[\freq, \dur], Prout(routs[1]),
+					\legato, 1.1,
+					\out, [0, compBus],
+					\group, sourceGroup,
+					\octave, 4,
+					\freq, Pkey(\freq)/2
+				),
+				120, Pbind(
+					\instrument, [ \bajorSpa, \fm1].choose,
+					[\freq, \dur], Prout(routs[1]),
+					\legato, 1.1,
+					\out, [0, compBus],
+					\group, sourceGroup,
+					\octave, 4,
+					\freq, Pkey(\freq)*2
+				),
+			]);
+		);
+
+
+		// Now is a free for all on the sections
+
+
+	}).play(clock);
+
+	/*
 	Pdef(\dev,
 		Pseq([
 			Ppar([
@@ -818,6 +898,7 @@ s.waitForBoot({
 			])
 		])
 	).play(clock);
+	*/
 
 	//Synth(\delay);
 
