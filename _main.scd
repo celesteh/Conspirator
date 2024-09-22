@@ -702,9 +702,9 @@ s.waitForBoot({
 			//});
 			nil.yield;
 		}, // 3
-		{|funcs, maxDur=420|
+		{|funcs, maxDur=420, maxLoops=10|
 			{
-				var playingRiff, index, next, stretch, octave, timeToMoveOn=false;
+				var playingRiff, index, next, stretch, octave, timeToMoveOn=false, loops=0;
 
 				"can match or contrast".postln;
 
@@ -714,7 +714,7 @@ s.waitForBoot({
 					"time to move on".postln;
 				}).play;
 
-				{timeToMoveOn.not}.while({
+				{timeToMoveOn.not && (loops < maxLoops)}.while({
 					index = (riffs.size -6).max(0).rrand(riffs.size-1);
 					0.2.coin.if({
 						0.2.coin.if({
@@ -739,6 +739,7 @@ s.waitForBoot({
 					});
 
 					"loop".postln;
+					loops = loops+1;
 				});
 				"ending match or contrast".postln;
 				nil;
@@ -753,7 +754,7 @@ s.waitForBoot({
 			playingRiff = Pseq([
 				Pseq(generatedRiffs.choose, 4),
 				Pseq(generatedRiffs.choose, 4)
-			], inf);
+			], inf).asStream;
 
 			next = playingRiff.next.copy;
 
@@ -837,7 +838,7 @@ s.waitForBoot({
 						}, {
 							//"amp %".format(soloInclination/10).postln;
 							//delayAmp = soloInclination/10;
-							looper.do({|l| l.set(\amp, soloInclination/8.2);});
+							looper.do({|l| l.set(\amp, soloInclination/9);});
 						});
 					}, {
 						//delayAmp = 0;
@@ -1022,6 +1023,7 @@ s.waitForBoot({
 			[
 				Pmono(
 					\delay,
+					\delayTime, Pwhite(5, 25),
 					\out, serpentBus,
 					\shouldChange, checkChange.copy,
 					\group, sourceGroup
