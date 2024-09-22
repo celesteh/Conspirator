@@ -5,7 +5,28 @@
 var detectingPitch = true, dEBUG=true, semaphore, bufs, riffs, current, phraseStart = -1, internalArousal=0.1,
 arousalSempahore, generatedRiffs, startTime=0, elapsedTime=0, storeRiff, shortCount=0, layoutGate=0, layoutBus,
 soloInclination=0, clock, compBus, serpentBus, recPuter, recSerpent, looper, startSynth, routs, section=0,
-looperSemaphore, sourceGroup, processGroup, fxGroup, delayAmp=0, sectionUpdater;
+looperSemaphore, sourceGroup, processGroup, fxGroup, sectionUpdater, shouldEnd=false, totalDur=1800,
+shouldChange = false, lastNOnsets, onsetArrSize=20, getAvgTempo, getAvgOctave, getRiffTempo,
+skipAheadForTesting = false, win;
+
+win =  Window.new("Emergency Change");
+
+Button(win, Rect(20, 20, 340, 30))
+.states_([
+	["should change"]
+])
+.action_({ arg butt;
+	"forcing change".postln;
+	shouldChange = true;
+});
+
+TextView(win, Rect(20, 70, 340, 250)).string_("Go Slow.\nDrone\nSpecial FX over Loops\nSlow\nMellow\nThink 1970s\nPeople want to like this\n\nVoice\nMouth shape\nShake horn");
+
+win.front;
+
+
+
+
 
 semaphore = Semaphore(1);
 arousalSempahore = Semaphore(1);
@@ -14,6 +35,58 @@ looperSemaphore = Semaphore(1);
 bufs = [];
 riffs = [ ];
 current = [];
+lastNOnsets = Array(onsetArrSize);
+
+getAvgTempo = {
+	var timings;
+	(lastNOnsets.size > 2).if({ // making this 2 instead of 1 prevents a race condition
+		timings = lastNOnsets.differentiate;
+		timings.removeAt(0);
+		timings.median;
+	}, {
+		1
+	});
+};
+
+getRiffTempo = {|riff|
+
+	var timings;
+
+	timings = riff.collect({|pair| pair.last });
+	timings.median;
+};
+
+
+getAvgOctave = {
+	var freqs, ret = 4;
+
+	freqs = [];
+
+	// this can get clobbered by race conditions, but it waiting for a semaphore will fuck up
+	// timing, so just put in a try in case it fucks up
+
+	try {
+
+		(current.size > 0).if({
+			freqs = current[(current.size-5).max(0), current.size-1];
+		});
+
+		(freqs. size < 5).if({
+			(riffs.size > 0).if({
+				freqs = riffs.last[(riffs.last.size - (5-freqs.size)).max(0), riffs.last.size-1];
+			}); // ok, that's quite enough
+		});
+
+		(freqs.size > 0).if({
+
+			freqs = freqs.div(15);
+			ret = freqs.mean;
+		});
+	} {};
+
+	ret ? 4;
+};
+
 // put notes into current, massage out the pbding at the EOF, use phRase start to get the start time and build from there
 
 s.options.memSize = s.options.memSize * 16;
@@ -21,6 +94,8 @@ s.options.memSize = s.options.memSize * 16;
 generatedRiffs = 10.collect({
 	5.rrand(20).collect ({ [5.rand, [2, 1].wchoose([0.7, 0.3])] }).pyramid(10.rand);
 });
+
+//riffs = [ generatedRiffs.last ];
 
 storeRiff = { arg collected, time;
 	var noteStartTime, prevFreq, prevStart=0, noteDur = 0, riff;
@@ -40,9 +115,9 @@ storeRiff = { arg collected, time;
 			noteStartTime = note[1];
 			(prevStart !=0).if({
 				noteDur =  noteStartTime - prevStart;
-				"found note % %".format(prevFreq, noteDur).postln;
+				//"found note % %".format(prevFreq, noteDur).postln;
 				(noteDur > 0.09).if({ // don't add super short notes
-					"add note % %".format(prevFreq, noteDur).postln;
+					//"add note % %".format(prevFreq, noteDur).postln;
 					(prevFreq > 30).if({
 						riff = riff.add([prevFreq, noteDur]);
 					}, {
@@ -82,16 +157,18 @@ sectionUpdater = {|current, adjustedTime|
 
 	elapsedTime = (Date.getDate.rawSeconds - adjustedTime).abs;
 
-	// Section 0 must last for 2 minutes
-	((elapsedTime > 120) && current == 0) {
-		section = 1;
-	};
-	// Section 1 must last for at least 3 minutes
-	((elapsedTime > ((3+2) * 60)) && current == 1){
-		section = 2;
-	};
+	"update suggested at %".format(elapsedTime).postln;
 
-}
+	// Section 0 must last for 2 minutes
+	((elapsedTime > 120) && current == 0) .if({
+		section = 1;
+	});
+	// Section 1 must last for at least 3.5 minutes
+	((elapsedTime > ((3.5+2) * 60)) && current == 1).if({
+		section = 2;
+	});
+
+};
 
 
 s.waitForBoot({
@@ -127,8 +204,6 @@ s.waitForBoot({
 	s.meter;
 
 	ClockFace().start;
-
-	//20.wait;
 
 
 	layoutBus = Bus.control(s);
@@ -197,9 +272,9 @@ s.waitForBoot({
 	}). add;
 
 	// looping buffer player
-	SynthDef(\player, { arg gate=1, out=0, amp=1, bufnum=0, offset=0, loopPoint=0.25, rate=1, pan=0, loop=1;
+	SynthDef(\player, { arg gate=1, out=0, amp=0.2, bufnum=0, offset=0, loopPoint=0.25, rate=1, pan=0, loop=1;
 
-		var env, player, index, max, min, loopDur, frames, lpf, panner;
+		var env, player, index, max, min, loopDur, frames, lpf, panner, verb;
 
 		frames = BufFrames.ir(bufnum);
 		max = loopPoint * frames;
@@ -211,10 +286,33 @@ s.waitForBoot({
 		env = EnvGen.kr(Env.asr(1,1,5), gate, doneAction:2) * Lag.kr(amp, 3);
 
 		lpf = LPF.ar(player, 1500);
-		panner = Pan2.ar(lpf, pan, env);
+		verb = FreeVerb.ar(lpf);
+		panner = Pan2.ar(verb, pan, env);
 
 		Out.ar(out, panner);
 	}).add;
+
+	SynthDef(\player2, { arg gate=1, out=0, amp=0.2, bufnum=0, offset=0, loopPoint=0.25, rate=1, pan=0, loop=1;
+
+		var env, player, index, max, min, loopDur, frames, lpf, panner, verb, shaped;
+
+		frames = BufFrames.ir(bufnum);
+		max = loopPoint * frames;
+		min = offset * frames;
+		//loopDur =  rate;// rate * (loopPoint - offset);
+		index = Phasor.ar(0, BufRateScale.kr(bufnum) * rate, min, max, min);
+
+		player = BufRd.ar(1, bufnum, index, loop);
+		shaped = SinOsc.ar(Rand(0.0, 0.001), player).distort;
+		env = EnvGen.kr(Env.asr(1,1,5), gate, doneAction:2) * Lag.kr(amp, 3);
+
+		lpf = LPF.ar(shaped, 1500);
+		verb = FreeVerb.ar(lpf);
+		panner = Pan2.ar(verb, pan, env);
+
+		Out.ar(out, panner);
+	}).add;
+
 
 	SynthDef(\bajorSpa, { arg gate=1, out=0, amp=1, freq=440, spread = 1, centre=0, dur = 1;
 
@@ -245,7 +343,10 @@ s.waitForBoot({
 		penv = EnvGen.kr(Env([0, 2pi, 0.1], [dur/2, dur/4], \sin, 2), gate);
 		fenv = EnvGen.kr(Env([2, 4, 1], [dur/2, dur/2], \exp, 2), gate);
 
-		fm = SinOsc.ar(freq, SinOsc.ar( freq * Demand.kr(Impulse.kr(0.000001), 0, Drand([1.5,2,3,4])), 0, penv), amp);
+		fm = SinOsc.ar(freq,
+			SinOsc.ar( freq * Demand.kr(Impulse.kr(0.000001), 0, Drand([1.5,2,3,4])),
+				0, penv),
+			amp);
 		lpf = RLPF.ar(fm, freq * fenv);
 		panner = Pan2.ar(lpf, pan, env);
 
@@ -253,12 +354,44 @@ s.waitForBoot({
 
 	}).add;
 
+	SynthDef(\binaural, {|out =0,freq=440, gate=1, amp=0.2, dur=1|
 
+		var sinL, sinR, modSin, fmL, fmR, env, penv;
+
+		penv = EnvGen.kr(Env.asr(0.05), gate) * 2pi;
+
+		modSin = SinOsc.ar(freq * (15/11), penv);
+		fmL = SinOsc.ar(Rand(0.08, 0.1), Rand(0, 2pi), 10, freq - 5);
+		fmR = SinOsc.ar(Rand(0.08, 0.1), Rand(0, 2pi), 10, freq + 5);
+		sinL = SinOsc.ar(fmL, modSin, amp/2.3);
+		sinR = SinOsc.ar(fmR, modSin, amp/2.3);
+
+		env = EnvGen.kr(Env.adsr(sustainLevel: 0.8, releaseTime:3), gate, doneAction:2);
+
+		Out.ar(out, [sinL, sinR] * env);
+	}).add;
+
+
+
+	SynthDef(\vosim, {|freq=440, out=0, amp=0.2, gate=1, pan=0, dur=1|
+
+		var vos, filt, fenv, env, frenv, panner;
+
+		frenv = (EnvGen.kr(Env.adsr, gate) * 10) + (freq-5);
+		vos = VOSIM.ar(Impulse.ar(XLine.kr(Rand(80, 90), Rand(98, 100), 0.1)),
+			frenv, 3, XLine.kr(0.99, 0.8, 2));
+		fenv = EnvGen.kr(Env.adsr, gate) * freq * 8;
+		filt = RLPF.ar(vos, fenv);
+		env = EnvGen.kr(Env.asr, gate, doneAction:2);
+		panner = Pan2.ar(filt, pan, env);
+
+		Out.ar(out, panner*amp*0.5);
+	}).add;
 
 	// One mode: track pitch, use that to do something
 
-	SynthDef(\pitch, { arg gate=1, in=0, thresh=0.2, space=0.5, longspace=1, layout=3,
-		rmswindow = 1600, layoutBus;
+	SynthDef(\pitch, { arg gate=1, in=0, thresh=0.2, space= /* 0.5 */1, longspace= /* 1 */ 3, layout= /* 3 */ 5,
+		rmswindow = 1600, layoutBus, soloRandTrig, lineBreakEnvDelay, lineBreakEnvDelayTime;
 
 		var input, env, fft_pitch, onset, chain, hasfreq, paused, linebreak, rest,
 		rms, xings, peaks, freq, fgate, ftrig, changed, lineBreakGate, lineBreakEnv;
@@ -308,8 +441,13 @@ s.waitForBoot({
 		// long silence (End of line)
 		lineBreakGate = A2K.kr(linebreak);
 		SendTrig.kr(lineBreakGate, 3, 1);
+
+		soloRandTrig = Dust.kr(0.005);
+		lineBreakGate = lineBreakGate + EnvGen.kr(Env([0, 1, 1, 0], [1, Rand(5, 60),1]),soloRandTrig);
 		// This gate is additive, so it goes up to 1, then subtracts to -1 <-- NO!!
 		lineBreakEnv = EnvGen.kr(Env.asr(40, 4, 40),lineBreakGate );//EnvGen.kr(Env([0, 1, 0], [2, 0.1, 4], \lin, 1), lineBreakGate);
+		lineBreakEnvDelayTime = Demand.kr(lineBreakGate, 0, Dwhite(0, 39));
+		lineBreakEnvDelay = DelayN.kr(lineBreakEnv, lineBreakEnvDelayTime, 40);
 		Out.kr(layoutBus, lineBreakEnv);
 
 
@@ -366,6 +504,10 @@ s.waitForBoot({
 			{ id ==1 } { /* onset */
 				//this.received_onset = time;
 				layoutGate=0;
+				(lastNOnsets.size >= onsetArrSize).if({
+					lastNOnsets.removeAt(0);
+				});
+				lastNOnsets.add(time);
 
 			}
 			{ id ==2 } { /* space */
@@ -396,22 +538,25 @@ s.waitForBoot({
 					//lang.eol;
 					storeRiff.(current, time);
 					current = [];
+					0.1.coin.if({ shouldChange = true });
 				});
+
 				layoutGate=1;
 			}
-			{ id == 4 } { /* time donaim */
+			{ id == 5 } { /* layout */
 				detectingPitch.if({
 
-					value = value.asInteger.abs;
-					((value > 0) && (value < 300)).if ({
-						dEBUG.if({
-							"time domain %".format(value).postln;
-						});
-						//lang.input_method.not.if({
-						//	this.freq_(value, time);
-						//},{"not time".postln;});
+
+					dEBUG.if({
+						"layout %".format(value).postln;
 					});
+					//lang.input_method.not.if({
+					//	this.freq_(value, time);
+					//},{"not time".postln;});
+
+					//0.5.coin.if({ shouldChange = true });
 				});
+
 			};
 
 			semaphore.signal;
@@ -434,34 +579,34 @@ s.waitForBoot({
 	clock = TempoClock(1/20);
 	clock.play;
 
-	routs = [
+	routs = [ // 0
 		{|interactionStart=10|
 			var adjustedTime;
 			adjustedTime = ((interactionStart - startTime)/2) + startTime;
 			{
-			var playingRiff, next;
-			"section 0".postln;
+				var playingRiff, next;
+				"section 0".postln;
 
-			playingRiff = Pseq([
-				Pseq(generatedRiffs.choose, 4),
-				Pseq(generatedRiffs.choose, 4),
-				Pseq(generatedRiffs.choose, 4)
-			], inf).asStream;
+				playingRiff = Pseq([
+					Pseq(generatedRiffs.choose, 4),
+					Pseq(generatedRiffs.choose, 4),
+					Pseq(generatedRiffs.choose, 4)
+				], inf).asStream;
 
-			{section == 0}.while({
-				//"note".postln;
-				playingRiff.next.yield;
-				(riffs.size > 0).if({
-					sectionUpdater(section, adjustedTime);
+				{section == 0}.while({
+					//"note".postln;
+					playingRiff.next.yield;
+					(riffs.size > 0).if({
+						sectionUpdater.(section, adjustedTime);
+					});
 				});
-			});
 
-			//section = 1;
-			startSynth = [ \bajorSpa, \fm1].choose;
-			nil.yield;
-		}
+				//section = 1;
+				startSynth = [ \bajorSpa, \fm1].choose;
+				nil.yield;
+			}
 		},
-		{
+		{ // 1
 
 			var playingRiff, index, next, stretch;
 
@@ -479,7 +624,7 @@ s.waitForBoot({
 					playingRiff = riffs[index];
 				});
 
-				riffs.postln;
+				//riffs.postln;
 				riffs.size.postln;
 
 				playingRiff.postln;
@@ -490,7 +635,7 @@ s.waitForBoot({
 				next = playingRiff.next.copy;
 
 				{next.notNil}.while({
-					next.postln;
+					//next.postln;
 					(next[1] < 1).if({
 						//next[1] = next[1] * stretch;
 					}, {
@@ -506,12 +651,14 @@ s.waitForBoot({
 			startSynth = [ \bajorSpa, \fm1].choose;
 			nil.yield;
 		},
-		{
-			var playingRiff, index, next, stretch, octave;
+		{ //2
+			var playingRiff, index, next, stretch, octave, pseq;
 
 			"section 2".postln;
 
-			{section == 2}.while({
+			pseq = [];
+			//{shouldChange.not}.while({
+			4.do({
 				index = (riffs.size -6).max(0).rrand(riffs.size-1);
 				0.2.coin.if({
 					0.2.coin.if({
@@ -523,35 +670,106 @@ s.waitForBoot({
 					playingRiff = riffs[index];
 				});
 
-				//riffs.postln;
-				//riffs.size.postln;
+				pseq = pseq.add(Pseq(playingRiff, 2));
+			});
+			//riffs.postln;
+			//riffs.size.postln;
 
-				//playingRiff.postln;
+			//playingRiff.postln;
 
-				stretch = [2, 4, 8].wchoose([0.1, 0.45, 0.45]);
-				octave = [1, 2, 0.5].choose;
+			stretch = [2, 4, 8].wchoose([0.1, 0.45, 0.45]);
+			octave = [1, 2, 0.5].choose;
 
-				playingRiff = Pseq(playingRiff, 2).asStream;
-				next = playingRiff.next.copy;
+			playingRiff = Pseq(pseq, 2).asStream;
+			next = playingRiff.next.copy;
 
-				{next.notNil}.while({
-					next.postln;
-					next[0] = next[0] * octave;
-					((next[1] < 2) && (next[1] > 0.1)).if({
-						(soloInclination > 3).if({
-							next[1] = next[1] / 1.5;
-						});
-					}, {
-						(next[1] > 10).if({
-							next[1] = next[1]/stretch;
-						});
+			{next.notNil && shouldChange.not}.while({
+				//next.postln;
+				next[0] = next[0] * octave;
+				((next[1] < 2) && (next[1] > 0.1)).if({
+					(soloInclination > 3).if({
+						next[1] = next[1] / 1.5;
 					});
-					next.yield;
-					next = playingRiff.next.copy;
+				}, {
+					(next[1] > 10).if({
+						next[1] = next[1]/stretch;
+					});
 				});
-				"loop".postln;
+				next.yield;
+				next = playingRiff.next.copy;
+			});
+			//"loop".postln;
+			//});
+			nil.yield;
+		}, // 3
+		{|funcs, maxDur=420|
+			{
+				var playingRiff, index, next, stretch, octave, timeToMoveOn=false;
+
+				"can match or contrast".postln;
+
+				Task({
+					maxDur.wait;
+					timeToMoveOn = true;
+					"time to move on".postln;
+				}).play;
+
+				{timeToMoveOn.not}.while({
+					index = (riffs.size -6).max(0).rrand(riffs.size-1);
+					0.2.coin.if({
+						0.2.coin.if({
+							playingRiff = riffs[index].scramble.pyramid(10.rand);
+						}, {
+							playingRiff = riffs[index].pyramid(10.rand);
+						})
+					} , {
+						playingRiff = riffs[index];
+					});
+
+					funcs.do({|func|
+						playingRiff = func.(playingRiff);
+					});
+
+					playingRiff = Pseq(playingRiff, 2).asStream;
+					next = playingRiff.next.copy;
+
+					{next.notNil && shouldChange.not}.while({
+						next.yield;
+						next = playingRiff.next.copy;
+					});
+
+					"loop".postln;
+				});
+				"ending match or contrast".postln;
+				nil;
+
+			}
+		},
+		{ //4
+			var playingRiff, stretch = 1, dur=1, next;
+
+			shouldChange = false;
+
+			playingRiff = Pseq([
+				Pseq(generatedRiffs.choose, 4),
+				Pseq(generatedRiffs.choose, 4)
+			], inf);
+
+			next = playingRiff.next.copy;
+
+			{shouldChange.not}.while({
+				dur = next[1] * stretch
+				[next[0], dur].yield;
+
+				next = playingRiff.next.copy;
+				stretch = stretch + 0.1;
+				(dur > 10).if({
+					shouldChange = true;
+				});
+
 			});
 			nil.yield;
+
 		}
 	];
 
@@ -560,7 +778,7 @@ s.waitForBoot({
 
 	Task({
 
-		var div, index, offset, loopPoint, rate;
+		var div, index, offset, loopPoint, rate, buf;
 
 		"in task".postln;
 		{ elapsedTime < (1800) }.while({  // 60 * 30
@@ -578,15 +796,16 @@ s.waitForBoot({
 					soloInclination = val;
 					arousalSempahore.signal;
 
-					(section == 0).if({
-						clock.tempo =  5.min(internalArousal + soloInclination);
+					(section == 1 ).if({
+						clock.tempo =  5.min(internalArousal + (soloInclination/2));
 					});
-					(soloInclination > 2).if({
+					((soloInclination > 2) && (section > 0)).if({
 
 						looper.isNil.if({
 							looperSemaphore.wait;
 							looper.isNil.if({
 								"starting looper".postln;
+								"section %".format(section).postln;
 								div = 3.rrand(5);
 								index = div.rand;
 								offset = div.reciprocal * index;
@@ -597,9 +816,15 @@ s.waitForBoot({
 									rate = 0.99.rrand(1.1) * [1, 0.5, 2].choose;
 								});
 
+								(section ==1).if({
+									buf = bufs[1];
+								}, {
+									buf = [bufs[0], bufs[1]].choose;
+								});
+
 								looper = 4.rrand(6).collect({
 									Synth(\player, [
-										\bufnum, bufs[0],
+										\bufnum, buf,
 										\amp, 0.1,
 										\pan, -0.75.rrand(0.75),
 										\rate, rate,
@@ -611,11 +836,11 @@ s.waitForBoot({
 							looperSemaphore.signal;
 						}, {
 							//"amp %".format(soloInclination/10).postln;
-							delayAmp = soloInclination/10;
-							looper.do({|l| l.set(\amp, soloInclination/4);});
+							//delayAmp = soloInclination/10;
+							looper.do({|l| l.set(\amp, soloInclination/8.2);});
 						});
 					}, {
-						delayAmp = 0;
+						//delayAmp = 0;
 						looper.notNil.if({
 							looper.do({|l| l.set(\gate, 0);});
 							{
@@ -623,12 +848,16 @@ s.waitForBoot({
 								looper.notNil.if({
 									"ending looper".postln;
 									"elapsed total time %".format((Date.getDate.rawSeconds - startTime).abs).postln;
+									"section %".format(section).postln;
 									5. wait;
 									//(((Date.getDate.rawSeconds - startTime).abs > 60) && (section == 1)).if({
 									//	section = 2;
 									//});
 									(section ==1).if({
-										sectionUpdater(section)
+										sectionUpdater.(section)
+									});
+									(section == 2).if({
+										0.5.coin.if({ shouldChange = true });
 									});
 									looper = nil;
 								});
@@ -642,6 +871,13 @@ s.waitForBoot({
 			});
 			elapsedTime = Date.getDate.rawSeconds - startTime;
 		});
+
+		shouldChange = true;
+		shouldEnd = true;
+		"timeToEnd".postln;
+		looper.notNil.if({
+			looper.do({|l| l.set(\gate, 0);});
+		});
 	}).play;
 
 
@@ -649,27 +885,415 @@ s.waitForBoot({
 	// use a Pspawner
 
 	Pspawner({|ps|
-		var interctionStart, activeSynth;
+		var interactionStart, activeSynth, algorithms, checkChange, basic, delayLoop, contrastPitch,
+		matchSpeed, contrastSpeed, matchOrDont, layerSerp;
 
-		ps.wait(30.rand);
-		interactionStart = Date.getDate.rawSeconds;
+		"pspawner running".postln;
 
 		activeSynth =  [ \bajorSpa, \fm1].choose;
 
+		checkChange = Pfunc({ //"checking for change".postln;
+			(shouldChange).if({
+				"changing".postln;
+				nil
+			}, {
+				//"not changing".postln;
+				false
+			});
+		});
 
-		// section 0
+
+		(skipAheadForTesting && dEBUG).not.if({
+
+			// make sure we get to section 0
+			{
+				180.wait;
+				sectionUpdater.(0);
+			}.fork;
+
+			ps.wait((30 + 10.rand) * clock.tempo); // the clock is slow
+
+			"waited".postln;
+			interactionStart = Date.getDate.rawSeconds;
+
+
+
+			// section 0
+			"sound starting".postln;
+			ps.seq(
+				Ppar([
+					Pbind(
+						\instrument, activeSynth,
+						[\degree, \dur], Prout(routs[0].(interactionStart)),
+						\legato, 1.1,
+						\out, [0, compBus],
+						\group, sourceGroup
+					),
+					Pbind(
+						\instrument, activeSynth,
+						[\degree, \dur], Prout(routs[0].(interactionStart)),
+						\legato, 1.1,
+						\out, [0, compBus],
+						\group, sourceGroup,
+						\octave, 4
+					)
+				]);
+			);
+
+			//section 1
+			activeSynth =  [ \bajorSpa, \fm1].choose;
+			shouldChange = false;
+
+			ps.seq(
+				Ptpar([
+					0, Pbind(
+						\instrument, activeSynth,
+						[\freq, \dur], Prout(routs[1]),
+						\legato, 1.1,
+						\out, [0, compBus],
+						\group, sourceGroup,
+						\shouldChange, checkChange.copy
+					),
+					0, Pbind(
+						\instrument, activeSynth,
+						[\freq, \dur], Prout(routs[1]),
+						\legato, 1.1,
+						\out, [0, compBus],
+						\group, sourceGroup,
+						\octave, 4,
+						\freq, Pkey(\freq)/2,
+						\shouldChange, checkChange.copy
+					),
+					120, Pbind(
+						\instrument, [ \bajorSpa, \fm1].choose,
+						[\freq, \dur], Prout(routs[1]),
+						\legato, 1.1,
+						\out, [0, compBus],
+						\group, sourceGroup,
+						\octave, 4,
+						\freq, Pkey(\freq)*2,
+						\shouldChange, checkChange.copy
+					),
+				]);
+			);
+		} , {
+			var scale;
+			scale = Scale.major;
+			"skipped forward".postln;
+			interactionStart = Date.getDate.rawSeconds;
+			section = 2;
+			riffs = generatedRiffs.choose.collect({|note|
+				[scale.degreeToFreq(note[0], 440, 0), note[1]]
+			});
+			riffs = [ riffs];
+		});
+
+		basic = [
+			Pbind(
+				\instrument, activeSynth,
+				[\freq, \dur], Prout(routs[2]),
+				\legato, 1.1,
+				\out, [0, compBus],
+				\group, sourceGroup,
+				\shouldChange, checkChange.copy
+			),
+			Pbind(
+				\instrument, activeSynth,
+				[\freq, \dur], Prout(routs[2]),
+				\legato, 1.1,
+				\out, [0, compBus],
+				\group, sourceGroup,
+				\octave, 4,
+				\freq, Pkey(\freq)/2,
+				\shouldChange, checkChange.copy
+			)
+		];
+
+		delayLoop = {|minLoops=4, maxLoops=6, lowDiv-3, highDiv=5, delayAmp|
+
+			delayAmp  = delayAmp ? Pfunc({
+				(soloInclination >= 2).if({
+					soloInclination /10;
+				}, {
+					0;
+				});
+			});
+
+			[
+				Pmono(
+					\delay,
+					\out, serpentBus,
+					\shouldChange, checkChange.copy,
+					\group, sourceGroup
+				),
+				Pmono(
+					\recordBus,
+					\bufnum, bufs[2],
+					\in, serpentBus,
+					\group, processGroup,
+					\shouldChange, checkChange.copy
+				),
+				Ppar(
+					minLoops.rrand(maxLoops).collect({
+						var rate, div, index, offset, loopPoint;
+						div = lowDiv.rrand(highDiv);
+						index = div.rand;
+						offset = div.reciprocal * index;
+						loopPoint = offset + div.reciprocal;
+
+						Pmono(
+							[\player,\player2].choose,
+							\bufnum, bufs[2],
+							\amp, delayAmp /4,
+							\pan, -0.75.rrand(0.75),
+							\rate, rate,
+							\offset, offset,
+							\loopPoint, (loopPoint + 0.1.rand).min(1),
+							\group, fxGroup,
+							\shouldChange, checkChange.copy
+						)
+					})
+				)
+			]
+		};
+
+		layerSerp =  {|minLoops=2, maxLoops=4, lowDiv-3, highDiv=5, delayAmp|
+
+			delayAmp  = delayAmp ? Pfunc({
+				(soloInclination >= 2).if({
+					soloInclination /10;
+				}, {
+					0;
+				});
+			});
+
+			[
+				Ppar(
+					minLoops.rrand(maxLoops).collect({
+						var rate, div, index, offset, loopPoint;
+						div = lowDiv.rrand(highDiv);
+						index = div.rand;
+						offset = div.reciprocal * index;
+						loopPoint = offset + div.reciprocal;
+
+						Pmono(
+							[\player,\player2].choose,
+							\bufnum, bufs[1],
+							\amp, delayAmp /4,
+							\pan, -0.75.rrand(0.75),
+							\rate, rate,
+							\offset, offset,
+							\loopPoint, (loopPoint + 0.1.rand).min(1),
+							\group, fxGroup,
+							\shouldChange, checkChange.copy
+						)
+					})
+				)
+			]
+		};
+
+
+		matchSpeed = {|activeRiff|
+			var tempo, riffTempo, ratio, modifiedRiff;
+
+			tempo = getAvgTempo.value;
+			riffTempo = getRiffTempo.(activeRiff);
+
+			ratio = tempo/riffTempo;
+
+			modifiedRiff = activeRiff.collect({|item|
+				[item.first, item.last * ratio]
+			});
+
+			modifiedRiff
+		};
+
+		contrastSpeed= {|activeRiff|
+			var tempo, riffTempo, ratio, correctiveRatio, modifiedRiff;
+
+			tempo = getAvgTempo.value;
+			riffTempo = getRiffTempo.(activeRiff);
+
+			ratio = tempo.max(riffTempo)/tempo.min(riffTempo);
+			// If this number is near 1, they're well matched
+
+			(ratio < 1.5).if ({ // we must act!
+
+				(tempo > 2).if({ // we're fast
+
+					correctiveRatio = 0.5;
+				}, {
+					(tempo < 0.8).if({ // we're slow
+
+						correctiveRatio = tempo.reciprocal
+					}, {
+						// we're median, so pick something
+						correctiveRatio = [0.5, 2, 4].choose;
+					})
+				});
+
+				modifiedRiff = activeRiff.collect({|item|
+					[item.first, item.last * correctiveRatio]
+				});
+			});
+
+			modifiedRiff ? activeRiff;
+		};
+
+
+		contrastPitch = {|activeRiff|
+
+			var range, modifiedRiff, correctiveRatio;
+
+			// no checking here, we'll just act
+
+			range = getAvgOctave.();
+
+			// 3 is low
+			// 4 is mid
+			// 5 is high
+
+			(range < 4).if({
+				correctiveRatio = [2,3,4, 6, 8].choose;
+
+			}, {
+				(range > 4).if({
+					correctiveRatio = [2,3].choose.reciprocal;
+				}, {
+					// we're mid, so pick either
+					correctiveRatio = [0.5, 2, 3].choose;
+				})
+			});
+
+			"correctiveRatio %".format(correctiveRatio).postln;
+
+			modifiedRiff = activeRiff.collect({|item|
+				[item.first * correctiveRatio, item.last]
+			});
+
+			modifiedRiff;
+		};
+
+		matchOrDont = {|funcs|
+			var maxDur;
+			maxDur = (3.0.rrand(7) * 60);
+
+			[
+				Pbind(
+					\instrument,  [ \bajorSpa, \fm1, \binaural, \vosim].choose;,
+					[\freq, \dur], Prout(routs[3].(funcs, maxDur)),
+					\legato, 1.1,
+					\out, [0, compBus],
+					\group, sourceGroup,
+					\shouldChange, checkChange.copy
+				),
+				Pbind(
+					\instrument,  [ \bajorSpa, \fm1, \binaural, \vosim].choose;,
+					[\freq, \dur], Prout(routs[3].(funcs, maxDur)),
+					\legato, 1.1,
+					\out, [0, compBus],
+					\group, sourceGroup,
+					\octave, 4,
+					\freq, Pkey(\freq)/2,
+					\shouldChange, checkChange.copy
+				)
+			];
+		};
+
+
+
+
+		algorithms = [
+			{
+				"basic".postln;
+				Ppar(basic);
+			},
+			{
+				"matchSpeed".postln;
+				Ppar(matchOrDont.([matchSpeed]))
+			},
+			{
+				"basic ++ delayLoop".postln;
+				Ppar(basic ++ delayLoop.value())
+			},
+			{
+				"contrastSpeed".postln;
+				Ppar(matchOrDont.([contrastSpeed]))
+			},
+			{
+				"contrastPitch matchSpeed".postln;
+				Ppar(matchOrDont.([contrastPitch, matchSpeed]))
+			},
+			{
+				"contrastPitch matchSpeed ++ delayLoop".postln;
+				Ppar(matchOrDont.([contrastPitch, matchSpeed]) ++ delayLoop.value())
+			},
+
+			{
+				"contrastPitch".postln;
+				Ppar(matchOrDont.([contrastPitch]))
+			},
+			{
+				"contrastSpeed contrastPitch".postln;
+				Ppar(matchOrDont.([contrastSpeed, contrastPitch]))
+			},
+			{
+				"layer serpent".postln;
+				Ppar(layerSerp.value())
+			},
+			{
+				"rest".postln;
+				Pbind(\degree, \rest,
+					\keepGoing, Pfunc({
+						(soloInclination < 2).if({
+							true
+						}, {
+							nil
+						})
+					}),
+					\shouldChange, checkChange.copy)
+			},
+			{
+				"rest".postln;
+				Pbind(\degree, \rest,
+					\keepGoing, Pfunc({
+						(soloInclination < 2).if({
+							true
+						}, {
+							nil
+						})
+					}),
+					\shouldChange, checkChange.copy)
+			}
+		];
+
+
+		// Now is a free for all on the sections
+		{shouldEnd.not}.while({
+
+			"in main loop".postln;
+			shouldChange = false;
+			activeSynth =  [ \bajorSpa, \fm1, \binaural, \vosim].choose;
+			ps.seq(algorithms.choose.value);
+
+		});
+
+		//end;
+
+		activeSynth =  [ \bajorSpa, \fm1].choose;
+
 		ps.seq(
 			Ppar([
 				Pbind(
 					\instrument, activeSynth,
-					[\degree, \dur], Prout(routs[0].(interctionStart)),
+					[\degree, \dur], Prout(routs[4]),
 					\legato, 1.1,
 					\out, [0, compBus],
 					\group, sourceGroup
 				),
 				Pbind(
 					\instrument, activeSynth,
-					[\degree, \dur], Prout(routs[0].(interctionStart)),
+					[\degree, \dur], Prout(routs[4]),
 					\legato, 1.1,
 					\out, [0, compBus],
 					\group, sourceGroup,
@@ -678,225 +1302,190 @@ s.waitForBoot({
 			]);
 		);
 
-		//section 1
-		activeSynth =  [ \bajorSpa, \fm1].choose;
-
-		ps.seq(
-			Ptpar([
-				0, Pbind(
-					\instrument, activeSynth,
-					[\freq, \dur], Prout(routs[1]),
-					\legato, 1.1,
-					\out, [0, compBus],
-					\group, sourceGroup
-				),
-				0, Pbind(
-					\instrument, activeSynth,
-					[\freq, \dur], Prout(routs[1]),
-					\legato, 1.1,
-					\out, [0, compBus],
-					\group, sourceGroup,
-					\octave, 4,
-					\freq, Pkey(\freq)/2
-				),
-				120, Pbind(
-					\instrument, [ \bajorSpa, \fm1].choose,
-					[\freq, \dur], Prout(routs[1]),
-					\legato, 1.1,
-					\out, [0, compBus],
-					\group, sourceGroup,
-					\octave, 4,
-					\freq, Pkey(\freq)*2
-				),
-			]);
-		);
-
-
-		// Now is a free for all on the sections
 
 
 	}).play(clock);
 
 	/*
 	Pdef(\dev,
-		Pseq([
-			Ppar([
-				Pbind(
-					\instrument, startSynth,
-					//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
-					[\degree, \dur], Prout(routs[0]),
+	Pseq([
+	Ppar([
+	Pbind(
+	\instrument, startSynth,
+	//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
+	[\degree, \dur], Prout(routs[0]),
 
-					//Pseq([
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4)], inf),
-					\legato, 1.1,
-					//\dur, Pfunc({|env|
-					//		var dur;
-					//	env.postln;
-					//	dur = env[\rawDur] / (internalArousal+ soloInclination);
-					//		["dur", dur].postln;
-					//		dur;
-					//}),
-					//\foo, Pfunc({"pbind".postln})
-					//	\sustain, 1.5
-					\out, [0, compBus],
-					\group, sourceGroup
-				),
-				Pbind(
-					\instrument, startSynth,
-					//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
-					[\degree, \dur], Prout(routs[0]),
-					\legato, 1.1,
-					//\dur, Pfunc({|env|
-					//	env.postln;
-					//	env[\rawDur] / (internalArousal+ soloInclination)
-					//}),
-					\octave, 4,
-					\out, [0, compBus],
-					\group, sourceGroup
-					//\foo, Pfunc({"pbind".postln})
-					//	\sustain, 1.5
-				)
-			]),
-			Ppar([
-				Pbind(
-					\instrument, startSynth,
-					//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
-					[\freq, \dur], Prout(routs[1]),
+	//Pseq([
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4)], inf),
+	\legato, 1.1,
+	//\dur, Pfunc({|env|
+	//		var dur;
+	//	env.postln;
+	//	dur = env[\rawDur] / (internalArousal+ soloInclination);
+	//		["dur", dur].postln;
+	//		dur;
+	//}),
+	//\foo, Pfunc({"pbind".postln})
+	//	\sustain, 1.5
+	\out, [0, compBus],
+	\group, sourceGroup
+	),
+	Pbind(
+	\instrument, startSynth,
+	//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
+	[\degree, \dur], Prout(routs[0]),
+	\legato, 1.1,
+	//\dur, Pfunc({|env|
+	//	env.postln;
+	//	env[\rawDur] / (internalArousal+ soloInclination)
+	//}),
+	\octave, 4,
+	\out, [0, compBus],
+	\group, sourceGroup
+	//\foo, Pfunc({"pbind".postln})
+	//	\sustain, 1.5
+	)
+	]),
+	Ppar([
+	Pbind(
+	\instrument, startSynth,
+	//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
+	[\freq, \dur], Prout(routs[1]),
 
-					//Pseq([
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4)], inf),
-					\legato, 1.1,
-					//\dur, Pfunc({|env|
-					//		var dur;
-					//	env.postln;
-					//	dur = env[\rawDur] / (internalArousal+ soloInclination);
-					//		["dur", dur].postln;
-					//		dur;
-					//}),
-					//\foo, Pfunc({"pbind".postln})
-					//	\sustain, 1.5
-					\out, [0, compBus],
-					\group, sourceGroup,
-					\addAction, \addToHead
-				),
-				Pbind(
-					\instrument, startSynth,
-					//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
-					[\freq, \dur], Prout(routs[1]),
-					\legato, 1.1,
-					//\dur, Pfunc({|env|
-					//	env.postln;
-					//	env[\rawDur] / (internalArousal+ soloInclination)
-					//}),
-					\octave, 4,
-					\out, [0, compBus],
-					\group, sourceGroup,
-					\addAction, \addToHead
-					//\foo, Pfunc({"pbind".postln})
-					//	\sustain, 1.5
-				)
-			]),
-			Ppar([
-				Pbind(
-					\instrument, startSynth,
-					//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
-					[\freq, \dur], Prout(routs[2]),
+	//Pseq([
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4)], inf),
+	\legato, 1.1,
+	//\dur, Pfunc({|env|
+	//		var dur;
+	//	env.postln;
+	//	dur = env[\rawDur] / (internalArousal+ soloInclination);
+	//		["dur", dur].postln;
+	//		dur;
+	//}),
+	//\foo, Pfunc({"pbind".postln})
+	//	\sustain, 1.5
+	\out, [0, compBus],
+	\group, sourceGroup,
+	\addAction, \addToHead
+	),
+	Pbind(
+	\instrument, startSynth,
+	//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
+	[\freq, \dur], Prout(routs[1]),
+	\legato, 1.1,
+	//\dur, Pfunc({|env|
+	//	env.postln;
+	//	env[\rawDur] / (internalArousal+ soloInclination)
+	//}),
+	\octave, 4,
+	\out, [0, compBus],
+	\group, sourceGroup,
+	\addAction, \addToHead
+	//\foo, Pfunc({"pbind".postln})
+	//	\sustain, 1.5
+	)
+	]),
+	Ppar([
+	Pbind(
+	\instrument, startSynth,
+	//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
+	[\freq, \dur], Prout(routs[2]),
 
-					//Pseq([
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4),
-					//  Pseq(generatedRiffs.choose, 4)], inf),
-					\legato, 1.1,
-					//\dur, Pfunc({|env|
-					//		var dur;
-					//	env.postln;
-					//	dur = env[\rawDur] / (internalArousal+ soloInclination);
-					//		["dur", dur].postln;
-					//		dur;
-					//}),
-					//\foo, Pfunc({"pbind".postln})
-					//	\sustain, 1.5
-					\out, [0, compBus],
-					\group, sourceGroup,
-					\addAction, \addToHead
-				),
-				Pbind(
-					\instrument, startSynth,
-					//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
-					[\freq, \dur], Prout(routs[2]),
-					\legato, 1.1,
-					//\dur, Pfunc({|env|
-					//	env.postln;
-					//	env[\rawDur] / (internalArousal+ soloInclination)
-					//}),
-					\octave, 4,
-					\out, [0, compBus],
-					\group, sourceGroup,
-					\addAction, \addToHead
-					//\foo, Pfunc({"pbind".postln})
-					//	\sustain, 1.5
-				),
-				Pmono(
-					\delay,
-					\out, serpentBus,
-					\keepGoing, Pfunc({
-						(section == 2).if({
-							true
-						}, {
-							nil
-						})
-					}),
-					\group, sourceGroup
-				),
-				Pmono(
-					\recordBus,
-					\bufnum, bufs[2],
-					\in, serpentBus,
-					\group, processGroup,
-					\keepGoing, Pfunc({
-						(section == 2).if({
-							true
-						}, {
-							nil
-						})
-					})
-				),
-				Ppar(
-					4.collect({
-						var rate, div, index, offset, loopPoint;
-						div = 3.rrand(5);
-						index = div.rand;
-						offset = div.reciprocal * index;
-						loopPoint = offset + div.reciprocal;
+	//Pseq([
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4),
+	//  Pseq(generatedRiffs.choose, 4)], inf),
+	\legato, 1.1,
+	//\dur, Pfunc({|env|
+	//		var dur;
+	//	env.postln;
+	//	dur = env[\rawDur] / (internalArousal+ soloInclination);
+	//		["dur", dur].postln;
+	//		dur;
+	//}),
+	//\foo, Pfunc({"pbind".postln})
+	//	\sustain, 1.5
+	\out, [0, compBus],
+	\group, sourceGroup,
+	\addAction, \addToHead
+	),
+	Pbind(
+	\instrument, startSynth,
+	//\dur, Pseq(10.collect({[2, 1].wchoose([0.7, 0.3])}), inf)/ Pfunc({internalArousal+ soloInclination}),
+	[\freq, \dur], Prout(routs[2]),
+	\legato, 1.1,
+	//\dur, Pfunc({|env|
+	//	env.postln;
+	//	env[\rawDur] / (internalArousal+ soloInclination)
+	//}),
+	\octave, 4,
+	\out, [0, compBus],
+	\group, sourceGroup,
+	\addAction, \addToHead
+	//\foo, Pfunc({"pbind".postln})
+	//	\sustain, 1.5
+	),
+	Pmono(
+	\delay,
+	\out, serpentBus,
+	\keepGoing, Pfunc({
+	(section == 2).if({
+	true
+	}, {
+	nil
+	})
+	}),
+	\group, sourceGroup
+	),
+	Pmono(
+	\recordBus,
+	\bufnum, bufs[2],
+	\in, serpentBus,
+	\group, processGroup,
+	\keepGoing, Pfunc({
+	(section == 2).if({
+	true
+	}, {
+	nil
+	})
+	})
+	),
+	Ppar(
+	4.collect({
+	var rate, div, index, offset, loopPoint;
+	div = 3.rrand(5);
+	index = div.rand;
+	offset = div.reciprocal * index;
+	loopPoint = offset + div.reciprocal;
 
-						Pmono(
-							\player,
-							\bufnum, bufs[2],
-							\amp, Pfunc({ delayAmp/4 }),
-							\pan, -0.75.rrand(0.75),
-							\rate, rate,
-							\offset, offset,
-							\loopPoint, (loopPoint + 0.1.rand).min(1),
-							\group, fxGroup,
-							\keepGoing, Pfunc({
-								(section == 2).if({
-									"section 2".postln;
-									true
-								}, {
-									nil
-								})
-							})
-						)
-				}))
-			])
-		])
+	Pmono(
+	\player,
+	\bufnum, bufs[2],
+	\amp, Pfunc({ delayAmp/4 }),
+	\pan, -0.75.rrand(0.75),
+	\rate, rate,
+	\offset, offset,
+	\loopPoint, (loopPoint + 0.1.rand).min(1),
+	\group, fxGroup,
+	\keepGoing, Pfunc({
+	(section == 2).if({
+	"section 2".postln;
+	true
+	}, {
+	nil
+	})
+	})
+	)
+	}))
+	])
+	])
 	).play(clock);
 	*/
 
