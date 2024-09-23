@@ -89,7 +89,7 @@ getAvgOctave = {
 
 // put notes into current, massage out the pbding at the EOF, use phRase start to get the start time and build from there
 
-s.options.memSize = s.options.memSize * 16;
+s.options.memSize = s.options.memSize * 64;  //please test
 
 generatedRiffs = 10.collect({
 	5.rrand(20).collect ({ [5.rand, [2, 1].wchoose([0.7, 0.3])] }).pyramid(10.rand);
@@ -704,7 +704,7 @@ s.waitForBoot({
 		}, // 3
 		{|funcs, maxDur=420, maxLoops=10|
 			{
-				var playingRiff, index, next, stretch, octave, timeToMoveOn=false, loops=0;
+				var playingRiff, index, next, stretch, octave, timeToMoveOn=false, loops=0, pseq;
 
 				"can match or contrast".postln;
 
@@ -714,8 +714,8 @@ s.waitForBoot({
 					"time to move on".postln;
 				}).play;
 
-				{timeToMoveOn.not && (loops < maxLoops)}.while({
-					index = (riffs.size -6).max(0).rrand(riffs.size-1);
+				{timeToMoveOn.not && (loops < maxLoops)  && shouldChange.not}.while({
+					index = (riffs.size - (6 + loops)).max(0).rrand(riffs.size-1);
 					0.2.coin.if({
 						0.2.coin.if({
 							playingRiff = riffs[index].scramble.pyramid(10.rand);
@@ -726,16 +726,22 @@ s.waitForBoot({
 						playingRiff = riffs[index];
 					});
 
+					//"playingRiff %".format(playingRiff).postln;
+
 					funcs.do({|func|
 						playingRiff = func.(playingRiff);
 					});
 
-					playingRiff = Pseq(playingRiff, 2).asStream;
-					next = playingRiff.next.copy;
+					//"playingRiff %".format(playingRiff).postln;
+
+					pseq = Pseq(playingRiff, 2).asStream;
+					next = pseq.next.copy;
+					//next.postln;
 
 					{next.notNil && shouldChange.not}.while({
+						//next.postln;
 						next.yield;
-						next = playingRiff.next.copy;
+						next = pseq.next.copy;
 					});
 
 					"loop".postln;
@@ -759,7 +765,7 @@ s.waitForBoot({
 			next = playingRiff.next.copy;
 
 			{shouldChange.not}.while({
-				dur = next[1] * stretch
+				dur = next[1] * stretch;
 				[next[0], dur].yield;
 
 				next = playingRiff.next.copy;
@@ -1023,8 +1029,32 @@ s.waitForBoot({
 			[
 				Pmono(
 					\delay,
-					\delayTime, Pwhite(5, 25),
+					\delayTime, 5.rrand(25),//Pwhite(5, 25),
 					\out, serpentBus,
+					\shouldChange, checkChange.copy,
+					\group, sourceGroup
+				),
+				Pmono(
+					\delay,
+					\delayTime, 5.rrand(25),//Pwhite(5, 25),
+					\out, 0,
+					\amp, 0.1,
+					\shouldChange, checkChange.copy,
+					\group, sourceGroup
+				),
+				Pmono(
+					\delay,
+					\delayTime, 5.rrand(25),//Pwhite(5, 25),
+					\out, 0,
+					\amp, 0.1,
+					\shouldChange, checkChange.copy,
+					\group, sourceGroup
+				),
+				Pmono(
+					\delay,
+					\delayTime, 5.rrand(25),//Pwhite(5, 25),
+					\out, 0,
+					\amp, 0.1,
 					\shouldChange, checkChange.copy,
 					\group, sourceGroup
 				),
@@ -1107,6 +1137,8 @@ s.waitForBoot({
 				[item.first, item.last * ratio]
 			});
 
+			"modifiedRiff % ".format(modifiedRiff).postln;
+
 			modifiedRiff
 		};
 
@@ -1137,7 +1169,10 @@ s.waitForBoot({
 				modifiedRiff = activeRiff.collect({|item|
 					[item.first, item.last * correctiveRatio]
 				});
+				modifiedRiff.postln;
 			});
+
+			"modifiedRiff % ".format(modifiedRiff).postln;
 
 			modifiedRiff ? activeRiff;
 		};
@@ -1172,6 +1207,8 @@ s.waitForBoot({
 			modifiedRiff = activeRiff.collect({|item|
 				[item.first * correctiveRatio, item.last]
 			});
+
+			"modifiedRiff % ".format(modifiedRiff).postln;
 
 			modifiedRiff;
 		};
@@ -1230,7 +1267,6 @@ s.waitForBoot({
 				"contrastPitch matchSpeed ++ delayLoop".postln;
 				Ppar(matchOrDont.([contrastPitch, matchSpeed]) ++ delayLoop.value())
 			},
-
 			{
 				"contrastPitch".postln;
 				Ppar(matchOrDont.([contrastPitch]))
@@ -1241,7 +1277,7 @@ s.waitForBoot({
 			},
 			{
 				"layer serpent".postln;
-				Ppar(layerSerp.value())
+				Ppar(layerSerp.value(delayAmp:0.2))
 			},
 			{
 				"rest".postln;
@@ -1283,6 +1319,8 @@ s.waitForBoot({
 		//end;
 
 		activeSynth =  [ \bajorSpa, \fm1].choose;
+
+		dEBUG.if({ "Ending".postln});
 
 		ps.seq(
 			Ppar([
